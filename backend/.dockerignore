@@ -1,0 +1,7 @@
+masrek.db
+masrek.db-wal
+masrek.db-shm
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/

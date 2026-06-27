@@ -1,0 +1,15 @@
+﻿# Database
+backend/masrek.db
+backend/masrek.db-wal
+backend/masrek.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Results (scan outputs)
+results/

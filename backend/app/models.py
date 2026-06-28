@@ -179,18 +179,25 @@ class ParsedFinding:
 
 # ── Location normalization ───────────────────────────────────────────────────
 
+_SOURCE_PREFIX_RE = re.compile(r"/app/source/")
+
+
 def normalize_location(url: str) -> str:
-    """Normalize a URL location for dedup.
+    """Normalize a URL or file-path location for dedup.
 
     C2 decision: keep query parameter NAMES but zero their VALUES so that the
     same XSS on ?q=<payload-a> and ?q=<payload-b> dedupes to one finding.
     This ensures that scanner-generated payload variations don't create
     duplicate findings. The param name is kept because ?q= and ?search= may
     be genuinely different injection points.
+
+    For SAST findings, strip the /app/source/ mount prefix so tools that use
+    absolute vs relative paths (osv-scanner vs trivy) still dedupe correctly.
     """
-    parsed = urlparse(url)
+    loc = _SOURCE_PREFIX_RE.sub("", url)
+    parsed = urlparse(loc)
     if not parsed.query:
-        return url.lower().rstrip("/")
+        return loc.lower().rstrip("/")
     params = parse_qs(parsed.query, keep_blank_values=True)
     zeroed = {k: ["0"] for k in sorted(params.keys())}
     new_query = urlencode(zeroed, doseq=True)

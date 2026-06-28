@@ -592,10 +592,11 @@ def _generate_detectability_findings(
 
 def _parse_sast_results(results_dir: Path) -> list[ParsedFinding]:
     """Run SAST parsers on the results directory."""
-    from .parsers import parse_osv
+    from .parsers import parse_osv, parse_trivy
 
     findings: list[ParsedFinding] = []
     findings.extend(parse_osv(results_dir / "osv-scanner.json", ""))
+    findings.extend(parse_trivy(results_dir / "trivy.json", ""))
     return findings
 
 

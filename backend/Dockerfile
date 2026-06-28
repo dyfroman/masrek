@@ -34,6 +34,14 @@ RUN curl -sSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SC
     -o /usr/local/bin/osv-scanner && \
     chmod +x /usr/local/bin/osv-scanner
 
+# trivy (SCA + IaC/misconfig scanner)
+ARG TRIVY_VERSION=0.71.0
+RUN curl -fsSL -o /tmp/trivy.tar.gz \
+        "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+    && tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy \
+    && rm /tmp/trivy.tar.gz \
+    && trivy --version
+
 # ── Python deps ──────────────────────────────────────────────────────────────
 
 COPY requirements.txt .

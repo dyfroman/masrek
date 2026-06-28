@@ -687,3 +687,164 @@ class TestModeConstraintMigration:
         ).fetchone()[0]
         assert leftover == 0
         c2.close()
+
+
+class TestTrivyParser:
+    """Verify trivy parser produces correct A03 + A08 findings."""
+
+    def test_parse_vulnerability_to_a03(self, tmp_path):
+        import json
+        from app.parsers.trivy import parse
+
+        trivy_data = {
+            "Results": [{
+                "Target": "package-lock.json",
+                "Type": "npm",
+                "Vulnerabilities": [{
+                    "VulnerabilityID": "CVE-2021-23337",
+                    "PkgName": "lodash",
+                    "InstalledVersion": "4.17.20",
+                    "FixedVersion": "4.17.21",
+                    "Severity": "CRITICAL",
+                    "Title": "Lodash Command Injection",
+                    "References": ["https://nvd.nist.gov/vuln/detail/CVE-2021-23337"],
+                }],
+            }],
+        }
+        f = tmp_path / "trivy.json"
+        f.write_text(json.dumps(trivy_data))
+
+        findings = parse(f, "test-run")
+        assert len(findings) == 1
+        assert findings[0].category == "A03:2025"
+        assert findings[0].source_tool == "trivy"
+        assert findings[0].severity == "critical"
+        assert "CVE-2021-23337" in findings[0].title
+        assert "lodash" in findings[0].title
+        assert "4.17.21" in findings[0].fix
+        assert findings[0].mapping == "exact"
+
+    def test_parse_misconfiguration_to_a08(self, tmp_path):
+        import json
+        from app.parsers.trivy import parse
+
+        trivy_data = {
+            "Results": [{
+                "Target": "Dockerfile",
+                "Type": "dockerfile",
+                "Misconfigurations": [{
+                    "ID": "DS002",
+                    "AVDID": "AVD-DS-0002",
+                    "Type": "Dockerfile Security Check",
+                    "Title": "Image user should not be 'root'",
+                    "Severity": "HIGH",
+                    "Description": "Running as root is insecure.",
+                    "Resolution": "Add USER instruction.",
+                    "CauseMetadata": {"StartLine": 1},
+                }],
+            }],
+        }
+        f = tmp_path / "trivy.json"
+        f.write_text(json.dumps(trivy_data))
+
+        findings = parse(f, "test-run")
+        assert len(findings) == 1
+        assert findings[0].category == "A08:2025"
+        assert findings[0].source_tool == "trivy"
+        assert findings[0].severity == "high"
+        assert "DS002" in findings[0].title
+        assert "root" in findings[0].title
+        assert findings[0].mapping == "exact"
+
+    def test_parse_empty_results(self, tmp_path):
+        import json
+        from app.parsers.trivy import parse
+
+        f = tmp_path / "trivy.json"
+        f.write_text(json.dumps({"Results": []}))
+        assert parse(f, "test") == []
+
+    def test_parse_missing_file(self, tmp_path):
+        from app.parsers.trivy import parse
+        assert parse(tmp_path / "nonexistent.json", "test") == []
+
+    def test_severity_mapping(self, tmp_path):
+        import json
+        from app.parsers.trivy import parse
+
+        for trivy_sev, expected in [
+            ("CRITICAL", "critical"), ("HIGH", "high"),
+            ("MEDIUM", "medium"), ("LOW", "low"), ("UNKNOWN", "info"),
+        ]:
+            data = {"Results": [{"Target": "t", "Type": "npm", "Vulnerabilities": [{
+                "VulnerabilityID": f"TEST-{trivy_sev}",
+                "PkgName": "pkg", "InstalledVersion": "1.0",
+                "Severity": trivy_sev, "Title": "test",
+            }]}]}
+            f = tmp_path / f"trivy-{trivy_sev}.json"
+            f.write_text(json.dumps(data))
+            findings = parse(f, "test")
+            assert findings[0].severity == expected, f"{trivy_sev} should map to {expected}"
+
+    def test_secret_values_redacted(self, tmp_path):
+        import json
+        from app.parsers.trivy import parse
+
+        data = {"Results": [{"Target": "config.yml", "Type": "config",
+            "Misconfigurations": [{
+                "ID": "SEC001", "Title": "Exposed password=hunter2",
+                "Severity": "HIGH", "Description": "password=hunter2 found",
+                "Resolution": "Remove api_key=abc123",
+                "CauseMetadata": {"StartLine": 5},
+            }]}]}
+        f = tmp_path / "trivy.json"
+        f.write_text(json.dumps(data))
+        findings = parse(f, "test")
+        assert "hunter2" not in findings[0].evidence
+        assert "abc123" not in findings[0].fix
+        assert "REDACTED" in findings[0].evidence
+        assert "REDACTED" in findings[0].fix
+
+
+class TestTrivyCheckRegistry:
+    """Verify trivy-specific check registry fields."""
+
+    def test_a08_has_trivy_sast_tool(self):
+        from app.checks import CHECKS
+        assert "trivy" in CHECKS["A08"].sast_tools
+
+    def test_a08_sast_detectability_is_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A08"].sast_detectability == "partial"
+
+    def test_a08_sast_detectability_never_full(self):
+        """A08 must stay partial — build-system tampering and SRI need human review."""
+        from app.checks import CHECKS
+        assert CHECKS["A08"].sast_detectability != "full"
+
+    def test_a08_combined_detectability_is_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A08"].combined_detectability == "partial"
+
+    def test_a03_has_both_sast_tools(self):
+        from app.checks import CHECKS
+        assert "osv-scanner" in CHECKS["A03"].sast_tools
+        assert "trivy" in CHECKS["A03"].sast_tools
+
+    def test_trivy_needed_for_a03(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A03"], "trivy") is True
+
+    def test_trivy_needed_for_a08(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A08"], "trivy") is True
+
+    def test_trivy_not_needed_for_a05(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A05"], "trivy") is False
+
+    def test_a08_partial_generates_detectability_finding(self):
+        from app.checks import get_sast_partial_checks
+        result = get_sast_partial_checks(["A08"])
+        assert len(result) == 1
+        assert result[0].id == "A08"

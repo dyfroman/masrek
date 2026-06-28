@@ -34,7 +34,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     detectability: "none",
     sastDetectability: "full",
     reasonHe: "לא ניתן לזהות באמצעות DAST — נדרש SAST/SCA על קוד המקור",
-    sastReasonHe: "osv-scanner בודק קבצי נעילה מול מסד נתוני הפגיעויות OSV לזיהוי CVE ידועים בתלויות.",
+    sastReasonHe: "osv-scanner + trivy בודקים קבצי נעילה ותלויות מול מסדי נתוני פגיעויות לזיהוי CVE ידועים.",
   },
   "A04:2025": {
     id: "A04",
@@ -77,9 +77,9 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     name: "Software and Data Integrity Failures",
     nameHe: "כשלי שלמות תוכנה ונתונים",
     detectability: "none",
-    sastDetectability: "none",
+    sastDetectability: "partial",
     reasonHe: "בעיקר נוגע ל-CI/CD ותהליך הבנייה. לא ניתן לבדיקה מספקת באמצעות DAST.",
-    sastReasonHe: "בעיקר נוגע ל-CI/CD ותהליך הבנייה. לא ניתן לבדיקה מספקת באמצעות SAST בלבד.",
+    sastReasonHe: "trivy מכסה שלמות תלויות ותצורת IaC/CI שגויה. זיוף מערכת הבנייה/צינור CI ו-SRI דורשים סקירה ידנית.",
   },
   "A09:2025": {
     id: "A09",

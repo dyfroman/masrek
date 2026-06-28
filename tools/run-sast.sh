@@ -64,6 +64,11 @@ needs_sast_tool() {
             echo "$CHECKS" | grep -qE '(^|,)A03(,|$)'
             return $?
             ;;
+        trivy)
+            # A03: Supply Chain + A08: Integrity
+            echo "$CHECKS" | grep -qE '(^|,)(A03|A08)(,|$)'
+            return $?
+            ;;
         *)
             return 1
             ;;
@@ -132,6 +137,72 @@ except:
         fi
     else
         echo "│  WARNING: osv-scanner not installed, skipping."
+        ERRORS=$((ERRORS + 1))
+    fi
+    echo "└──────────────────────────────────────────────"
+fi
+
+# ── trivy (A03: Supply Chain + A08: Integrity/IaC) ──────────────────────────
+
+if needs_sast_tool "trivy"; then
+    echo ""
+    echo "┌── trivy (A03: Supply Chain + A08: Integrity) ──"
+    TRIVY_OUT="$RESULTS_DIR/trivy.json"
+    TRIVY_SBOM="$RESULTS_DIR/trivy-sbom.cdx.json"
+
+    if command -v trivy &>/dev/null; then
+        # Phase 1: vulnerability + misconfig scan (JSON)
+        echo "│  Scanning $SOURCE_DIR for vulns + misconfigs ..."
+        set +e
+        timeout "${TOOL_TIMEOUT}s" trivy fs --format json --scanners vuln,misconfig,secret \
+            --skip-java-db-update \
+            "$SOURCE_DIR" > "$TRIVY_OUT" 2>/dev/null
+        TRIVY_EXIT=$?
+        set -e
+
+        if [[ $TRIVY_EXIT -eq 124 ]]; then
+            echo "│  WARNING: trivy scan timed out after ${MAX_MINUTES}m"
+            ERRORS=$((ERRORS + 1))
+        elif [[ $TRIVY_EXIT -eq 0 ]]; then
+            VULN_COUNT=$(python3 -c "
+import json
+try:
+    data = json.load(open('$TRIVY_OUT'))
+    vulns = sum(len(r.get('Vulnerabilities', [])) for r in data.get('Results', []))
+    miscs = sum(len(r.get('Misconfigurations', [])) for r in data.get('Results', []))
+    print(f'{vulns} vuln(s), {miscs} misconfig(s)')
+except:
+    print('?')
+" 2>/dev/null || echo "?")
+            echo "│  Found $VULN_COUNT."
+        else
+            echo "│  WARNING: trivy exited with code $TRIVY_EXIT"
+        fi
+
+        if [[ -f "$TRIVY_OUT" ]]; then
+            SIZE=$(stat -c%s "$TRIVY_OUT" 2>/dev/null || echo "0")
+            echo "│  Output: $TRIVY_OUT ($SIZE bytes)"
+        fi
+
+        # Phase 2: SBOM generation (CycloneDX)
+        echo "│  Generating SBOM (CycloneDX) ..."
+        set +e
+        timeout "${TOOL_TIMEOUT}s" trivy fs --format cyclonedx \
+            --skip-java-db-update \
+            "$SOURCE_DIR" > "$TRIVY_SBOM" 2>/dev/null
+        SBOM_EXIT=$?
+        set -e
+
+        if [[ $SBOM_EXIT -eq 124 ]]; then
+            echo "│  WARNING: trivy SBOM generation timed out"
+        elif [[ $SBOM_EXIT -eq 0 ]] && [[ -f "$TRIVY_SBOM" ]]; then
+            SBOM_SIZE=$(stat -c%s "$TRIVY_SBOM" 2>/dev/null || echo "0")
+            echo "│  SBOM: $TRIVY_SBOM ($SBOM_SIZE bytes)"
+        else
+            echo "│  WARNING: SBOM generation failed (exit $SBOM_EXIT)"
+        fi
+    else
+        echo "│  WARNING: trivy not installed, skipping."
         ERRORS=$((ERRORS + 1))
     fi
     echo "└──────────────────────────────────────────────"

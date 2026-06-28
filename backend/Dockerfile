@@ -42,6 +42,11 @@ RUN curl -fsSL -o /tmp/trivy.tar.gz \
     && rm /tmp/trivy.tar.gz \
     && trivy --version
 
+# semgrep (SAST: source code pattern analysis)
+ARG SEMGREP_VERSION=1.168.0
+RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" \
+    && semgrep --version
+
 # ── Python deps ──────────────────────────────────────────────────────────────
 
 COPY requirements.txt .

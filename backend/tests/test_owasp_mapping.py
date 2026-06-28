@@ -544,7 +544,8 @@ class TestSastCheckRegistry:
         ids = {c.id for c in result}
         assert "A01" in ids
         assert "A04" in ids
-        assert "A05" in ids
+        # A05 now has semgrep SAST coverage — no longer "not testable"
+        assert "A05" not in ids
         assert "A03" not in ids
 
     def test_dast_only_categories_show_not_testable_in_sast(self):
@@ -848,3 +849,246 @@ class TestTrivyCheckRegistry:
         result = get_sast_partial_checks(["A08"])
         assert len(result) == 1
         assert result[0].id == "A08"
+
+
+class TestSemgrepParser:
+    """Verify semgrep parser maps findings to correct OWASP categories."""
+
+    SQLI_RESULT = {
+        "check_id": "python.lang.security.audit.formatted-sql-query.formatted-sql-query",
+        "path": "vuln_sqli.py",
+        "start": {"line": 6, "col": 12},
+        "end": {"line": 6, "col": 71},
+        "extra": {
+            "severity": "WARNING",
+            "message": "Detected SQL statement that is tainted by user input.",
+            "lines": "    query = \"SELECT * FROM users WHERE username = '\" + username + \"'\"",
+            "metadata": {
+                "cwe": ["CWE-89: SQL Injection"],
+                "owasp": ["A03:2021 - Injection"],
+                "references": ["https://owasp.org/Top10/A03_2021-Injection/"],
+            },
+        },
+    }
+
+    SECRET_RESULT = {
+        "check_id": "python.lang.security.audit.hardcoded-password.hardcoded-password",
+        "path": "vuln_secrets.py",
+        "start": {"line": 4, "col": 1},
+        "end": {"line": 4, "col": 38},
+        "extra": {
+            "severity": "ERROR",
+            "message": "Hardcoded password detected: password=SuperSecret123!",
+            "lines": 'DATABASE_PASSWORD = "SuperSecret123!"',
+            "metadata": {
+                "cwe": ["CWE-798: Use of Hard-coded Credentials"],
+                "owasp": ["A07:2021 - Identification and Authentication Failures"],
+            },
+        },
+    }
+
+    EVAL_RESULT = {
+        "check_id": "python.lang.security.audit.eval-detected.eval-detected",
+        "path": "vuln_design.py",
+        "start": {"line": 8, "col": 12},
+        "end": {"line": 8, "col": 29},
+        "extra": {
+            "severity": "WARNING",
+            "message": "Detected the use of eval(). Consider safer alternatives.",
+            "lines": "    return eval(user_input)",
+            "metadata": {
+                "cwe": ["CWE-94: Code Injection"],
+                "owasp": ["A03:2021 - Injection"],
+            },
+        },
+    }
+
+    def test_sqli_maps_to_a05(self, tmp_path):
+        import json
+        from app.parsers.semgrep import parse
+
+        data = {"results": [self.SQLI_RESULT], "errors": []}
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(data))
+
+        findings = parse(f, "test")
+        assert len(findings) == 1
+        assert findings[0].category == "A05:2025"
+        assert findings[0].source_tool == "semgrep"
+        assert findings[0].severity == "medium"
+        assert "vuln_sqli.py:6" == findings[0].location
+        assert findings[0].mapping == "exact"
+
+    def test_hardcoded_secret_maps_to_a07(self, tmp_path):
+        import json
+        from app.parsers.semgrep import parse
+
+        data = {"results": [self.SECRET_RESULT], "errors": []}
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(data))
+
+        findings = parse(f, "test")
+        assert len(findings) == 1
+        assert findings[0].category == "A07:2025"
+        assert findings[0].source_tool == "semgrep"
+        assert findings[0].severity == "high"
+
+    def test_secret_values_redacted(self, tmp_path):
+        import json
+        from app.parsers.semgrep import parse
+
+        data = {"results": [self.SECRET_RESULT], "errors": []}
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(data))
+
+        findings = parse(f, "test")
+        assert "SuperSecret123" not in findings[0].evidence
+        assert "SuperSecret123" not in findings[0].title
+        assert "REDACTED" in findings[0].evidence or "REDACTED" in findings[0].title
+
+    def test_eval_maps_to_a05_via_cwe(self, tmp_path):
+        """eval() has CWE-94 (Code Injection) → maps to A05."""
+        import json
+        from app.parsers.semgrep import parse
+
+        data = {"results": [self.EVAL_RESULT], "errors": []}
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(data))
+
+        findings = parse(f, "test")
+        assert len(findings) == 1
+        assert findings[0].category == "A05:2025"
+
+    def test_parse_empty_results(self, tmp_path):
+        import json
+        from app.parsers.semgrep import parse
+
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps({"results": [], "errors": []}))
+        assert parse(f, "test") == []
+
+    def test_parse_missing_file(self, tmp_path):
+        from app.parsers.semgrep import parse
+        assert parse(tmp_path / "nonexistent.json", "test") == []
+
+    def test_owasp_metadata_fallback(self, tmp_path):
+        """When CWE is not in our mapping, fall back to OWASP metadata."""
+        import json
+        from app.parsers.semgrep import parse
+
+        result = {
+            "check_id": "test.rule",
+            "path": "test.py",
+            "start": {"line": 1, "col": 1},
+            "end": {"line": 1, "col": 10},
+            "extra": {
+                "severity": "INFO",
+                "message": "Test finding",
+                "metadata": {
+                    "cwe": ["CWE-99999: Made-up CWE"],
+                    "owasp": ["A09:2021 - Logging Failures"],
+                },
+            },
+        }
+        data = {"results": [result], "errors": []}
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(data))
+
+        findings = parse(f, "test")
+        assert findings[0].category == "A09:2025"
+        assert findings[0].mapping == "tag"
+
+    def test_severity_mapping(self, tmp_path):
+        import json
+        from app.parsers.semgrep import parse
+
+        for sg_sev, expected in [("ERROR", "high"), ("WARNING", "medium"), ("INFO", "low")]:
+            result = {
+                "check_id": "test.sev",
+                "path": "t.py",
+                "start": {"line": 1, "col": 1},
+                "end": {"line": 1, "col": 5},
+                "extra": {
+                    "severity": sg_sev,
+                    "message": "test",
+                    "metadata": {"cwe": ["CWE-89"]},
+                },
+            }
+            data = {"results": [result], "errors": []}
+            f = tmp_path / f"semgrep-{sg_sev}.json"
+            f.write_text(json.dumps(data))
+            findings = parse(f, "test")
+            assert findings[0].severity == expected, f"{sg_sev} → {expected}"
+
+
+class TestSemgrepCheckRegistry:
+    """Verify semgrep check registry fields."""
+
+    def test_a05_has_semgrep(self):
+        from app.checks import CHECKS
+        assert "semgrep" in CHECKS["A05"].sast_tools
+
+    def test_a06_has_semgrep(self):
+        from app.checks import CHECKS
+        assert "semgrep" in CHECKS["A06"].sast_tools
+
+    def test_a06_sast_detectability_is_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A06"].sast_detectability == "partial"
+
+    def test_a06_sast_detectability_never_full(self):
+        """A06 must stay partial — architectural design flaws need human review."""
+        from app.checks import CHECKS
+        assert CHECKS["A06"].sast_detectability != "full"
+
+    def test_a07_has_semgrep(self):
+        from app.checks import CHECKS
+        assert "semgrep" in CHECKS["A07"].sast_tools
+
+    def test_a07_sast_detectability_is_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A07"].sast_detectability == "partial"
+
+    def test_a09_has_semgrep(self):
+        from app.checks import CHECKS
+        assert "semgrep" in CHECKS["A09"].sast_tools
+
+    def test_a09_sast_detectability_is_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A09"].sast_detectability == "partial"
+
+    def test_a02_has_semgrep(self):
+        from app.checks import CHECKS
+        assert "semgrep" in CHECKS["A02"].sast_tools
+
+    def test_semgrep_needed_for_a05(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A05"], "semgrep") is True
+
+    def test_semgrep_needed_for_a06(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A06"], "semgrep") is True
+
+    def test_semgrep_needed_for_a07(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A07"], "semgrep") is True
+
+    def test_semgrep_needed_for_a09(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A09"], "semgrep") is True
+
+    def test_semgrep_not_needed_for_a03(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A03"], "semgrep") is False
+
+    def test_a06_partial_in_sast_partial_list(self):
+        from app.checks import get_sast_partial_checks
+        result = get_sast_partial_checks(["A06"])
+        assert len(result) == 1
+        assert result[0].id == "A06"
+
+    def test_a09_partial_in_sast_partial_list(self):
+        from app.checks import get_sast_partial_checks
+        result = get_sast_partial_checks(["A09"])
+        assert len(result) == 1
+        assert result[0].id == "A09"

@@ -69,6 +69,11 @@ needs_sast_tool() {
             echo "$CHECKS" | grep -qE '(^|,)(A03|A08)(,|$)'
             return $?
             ;;
+        semgrep)
+            # A02: Misconfig + A05: Injection + A06: Insecure Design + A07: Auth + A09: Logging
+            echo "$CHECKS" | grep -qE '(^|,)(A02|A05|A06|A07|A09)(,|$)'
+            return $?
+            ;;
         *)
             return 1
             ;;
@@ -203,6 +208,53 @@ except:
         fi
     else
         echo "│  WARNING: trivy not installed, skipping."
+        ERRORS=$((ERRORS + 1))
+    fi
+    echo "└──────────────────────────────────────────────"
+fi
+
+# ── semgrep (A02/A05/A06/A07/A09: source code patterns) ─────────────────────
+
+if needs_sast_tool "semgrep"; then
+    echo ""
+    echo "┌── semgrep (A02/A05/A06/A07/A09: Code Patterns) ──"
+    SEMGREP_OUT="$RESULTS_DIR/semgrep.json"
+
+    if command -v semgrep &>/dev/null; then
+        echo "│  Scanning $SOURCE_DIR for code-level vulnerabilities ..."
+        # semgrep exit codes: 0=no findings, 1=findings found (not an error for us)
+        # --config auto requires metrics; use explicit security rulesets instead
+        set +e
+        timeout "${TOOL_TIMEOUT}s" semgrep scan \
+            --config "p/security-audit" --config "p/bandit" --config "p/secrets" \
+            --json --metrics=off \
+            "$SOURCE_DIR" > "$SEMGREP_OUT" 2>/dev/null
+        SEMGREP_EXIT=$?
+        set -e
+
+        if [[ $SEMGREP_EXIT -eq 124 ]]; then
+            echo "│  WARNING: semgrep timed out after ${MAX_MINUTES}m"
+            ERRORS=$((ERRORS + 1))
+        elif [[ $SEMGREP_EXIT -eq 0 ]] || [[ $SEMGREP_EXIT -eq 1 ]]; then
+            FINDING_COUNT=$(python3 -c "
+import json
+try:
+    data = json.load(open('$SEMGREP_OUT'))
+    print(len(data.get('results', [])))
+except:
+    print('?')
+" 2>/dev/null || echo "?")
+            echo "│  Found $FINDING_COUNT finding(s)."
+        else
+            echo "│  WARNING: semgrep exited with code $SEMGREP_EXIT"
+        fi
+
+        if [[ -f "$SEMGREP_OUT" ]]; then
+            SIZE=$(stat -c%s "$SEMGREP_OUT" 2>/dev/null || echo "0")
+            echo "│  Output: $SEMGREP_OUT ($SIZE bytes)"
+        fi
+    else
+        echo "│  WARNING: semgrep not installed, skipping."
         ERRORS=$((ERRORS + 1))
     fi
     echo "└──────────────────────────────────────────────"

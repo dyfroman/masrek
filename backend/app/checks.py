@@ -34,6 +34,7 @@ CHECKS: dict[str, Check] = {
         tools=["zap", "nuclei"],
         active_tools=["zap", "nuclei"],
         detectability="full",
+        combined_detectability="full",
         reason="ZAP forced-browse + access-control rules, nuclei exposure/IDOR templates",
         reason_he="סריקת ZAP לגישה לא מורשית + תבניות nuclei לחשיפת מידע",
     ),
@@ -74,6 +75,7 @@ CHECKS: dict[str, Check] = {
         tools=["testssl", "zap"],
         active_tools=["zap"],
         detectability="partial",
+        combined_detectability="partial",
         reason="testssl.sh covers TLS config; ZAP finds insecure cookies/mixed-content. Cannot test internal crypto logic.",
         reason_he="testssl.sh בודק תצורת TLS; ZAP מוצא עוגיות לא מאובטחות. לא ניתן לבדוק לוגיקה קריפטוגרפית פנימית.",
     ),
@@ -159,6 +161,7 @@ CHECKS: dict[str, Check] = {
         tools=["zap", "nuclei"],
         active_tools=["zap", "nuclei"],
         detectability="partial",
+        combined_detectability="partial",
         reason="ZAP error-disclosure/stack-trace rules + error probing. Cannot detect all internal exception handling gaps.",
         reason_he="חוקי ZAP לחשיפת שגיאות + stack traces. לא ניתן לזהות את כל הפערים בטיפול בחריגים.",
     ),
@@ -219,4 +222,22 @@ def get_partial_checks(selected: list[str]) -> list[Check]:
         CHECKS[cid]
         for cid in selected
         if cid in CHECKS and CHECKS[cid].detectability == "partial"
+    ]
+
+
+def get_combined_not_testable_checks(selected: list[str]) -> list[Check]:
+    """Return selected checks with combined_detectability=none."""
+    return [
+        CHECKS[cid]
+        for cid in selected
+        if cid in CHECKS and CHECKS[cid].combined_detectability == "none"
+    ]
+
+
+def get_combined_partial_checks(selected: list[str]) -> list[Check]:
+    """Return selected checks with combined_detectability=partial."""
+    return [
+        CHECKS[cid]
+        for cid in selected
+        if cid in CHECKS and CHECKS[cid].combined_detectability == "partial"
     ]

@@ -1077,6 +1077,163 @@ class TestSemgrepCheckRegistry:
         from app.checks import checks_need_sast_tool
         assert checks_need_sast_tool(["A09"], "semgrep") is True
 
+
+# ── Combined Scan Tests ─────────────────────────────────────────────────────
+
+
+class TestCombinedDetectability:
+    """Tests for combined DAST+SAST detectability registry."""
+
+    def test_all_checks_have_combined_detectability(self):
+        from app.checks import CHECKS
+        for cid, check in CHECKS.items():
+            assert check.combined_detectability in ("full", "partial", "none"), (
+                f"{cid} combined_detectability={check.combined_detectability!r}"
+            )
+
+    def test_combined_at_least_as_good_as_dast(self):
+        from app.checks import CHECKS
+        order = {"full": 2, "partial": 1, "none": 0}
+        for cid, check in CHECKS.items():
+            assert order[check.combined_detectability] >= order[check.detectability], (
+                f"{cid}: combined={check.combined_detectability} < dast={check.detectability}"
+            )
+
+    def test_combined_at_least_as_good_as_sast(self):
+        from app.checks import CHECKS
+        order = {"full": 2, "partial": 1, "none": 0}
+        for cid, check in CHECKS.items():
+            assert order[check.combined_detectability] >= order[check.sast_detectability], (
+                f"{cid}: combined={check.combined_detectability} < sast={check.sast_detectability}"
+            )
+
+    def test_no_combined_none_when_either_layer_covers(self):
+        from app.checks import CHECKS
+        for cid, check in CHECKS.items():
+            if check.detectability != "none" or check.sast_detectability != "none":
+                assert check.combined_detectability != "none", (
+                    f"{cid}: combined=none but dast={check.detectability}, sast={check.sast_detectability}"
+                )
+
+    def test_a01_combined_full(self):
+        from app.checks import CHECKS
+        assert CHECKS["A01"].combined_detectability == "full"
+
+    def test_a03_combined_full(self):
+        from app.checks import CHECKS
+        assert CHECKS["A03"].combined_detectability == "full"
+
+    def test_a05_combined_full(self):
+        from app.checks import CHECKS
+        assert CHECKS["A05"].combined_detectability == "full"
+
+    def test_a06_combined_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A06"].combined_detectability == "partial"
+
+    def test_a08_combined_partial(self):
+        from app.checks import CHECKS
+        assert CHECKS["A08"].combined_detectability == "partial"
+
+    def test_combined_not_testable_empty_when_all_selected(self):
+        from app.checks import ALL_CHECK_IDS, get_combined_not_testable_checks
+        result = get_combined_not_testable_checks(ALL_CHECK_IDS)
+        assert len(result) == 0, (
+            f"No check should be untestable in combined mode, got: "
+            f"{[c.id for c in result]}"
+        )
+
+    def test_combined_partial_returns_correct_checks(self):
+        from app.checks import ALL_CHECK_IDS, get_combined_partial_checks
+        partials = get_combined_partial_checks(ALL_CHECK_IDS)
+        partial_ids = {c.id for c in partials}
+        assert "A04" in partial_ids
+        assert "A06" in partial_ids
+        assert "A07" in partial_ids
+        assert "A08" in partial_ids
+        assert "A09" in partial_ids
+        assert "A10" in partial_ids
+        assert "A01" not in partial_ids
+        assert "A05" not in partial_ids
+
+
+class TestCombinedTargetType:
+    """Tests for combined target type in models."""
+
+    def test_combined_enum_exists(self):
+        from app.models import TargetType
+        assert TargetType.combined.value == "combined"
+
+    def test_scan_request_accepts_combined(self):
+        from app.models import ScanRequest
+        req = ScanRequest(
+            target_type="combined",
+            target_url="http://localhost:3000",
+            source_path="/app/source",
+        )
+        assert req.target_type.value == "combined"
+        assert req.target_url == "http://localhost:3000"
+        assert req.source_path == "/app/source"
+
+    def test_combined_requires_both_fields(self):
+        from app.models import ScanRequest
+        req = ScanRequest(target_type="combined")
+        assert req.target_url is None
+        assert req.source_path is None
+
+
+class TestCombinedDetectabilityFindings:
+    """Tests for _generate_combined_detectability_findings."""
+
+    def test_no_not_testable_findings_in_combined(self):
+        from app.scanner import _generate_combined_detectability_findings
+        from app.checks import ALL_CHECK_IDS
+        findings = _generate_combined_detectability_findings(
+            ALL_CHECK_IDS, "http://localhost:3000", "/app/source",
+        )
+        not_testable = [f for f in findings if "לא ניתן לבדיקה אוטומטית" in f.title]
+        assert len(not_testable) == 0
+
+    def test_partial_findings_generated(self):
+        from app.scanner import _generate_combined_detectability_findings
+        from app.checks import ALL_CHECK_IDS
+        findings = _generate_combined_detectability_findings(
+            ALL_CHECK_IDS, "http://localhost:3000", "/app/source",
+        )
+        partial = [f for f in findings if "כיסוי חלקי (DAST+SAST)" in f.title]
+        assert len(partial) == 6
+
+    def test_partial_finding_categories(self):
+        from app.scanner import _generate_combined_detectability_findings
+        from app.checks import ALL_CHECK_IDS
+        findings = _generate_combined_detectability_findings(
+            ALL_CHECK_IDS, "http://localhost:3000", "/app/source",
+        )
+        cats = {f.category for f in findings if "חלקי" in f.title}
+        assert "A04:2025" in cats
+        assert "A06:2025" in cats
+        assert "A07:2025" in cats
+        assert "A08:2025" in cats
+        assert "A09:2025" in cats
+        assert "A10:2025" in cats
+
+    def test_all_combined_findings_are_info(self):
+        from app.scanner import _generate_combined_detectability_findings
+        from app.checks import ALL_CHECK_IDS
+        findings = _generate_combined_detectability_findings(
+            ALL_CHECK_IDS, "http://localhost:3000", "/app/source",
+        )
+        for f in findings:
+            assert f.severity == "info"
+
+    def test_combined_findings_source_tool(self):
+        from app.scanner import _generate_combined_detectability_findings
+        findings = _generate_combined_detectability_findings(
+            ["A04", "A05"], "http://localhost:3000", "/app/source",
+        )
+        for f in findings:
+            assert f.source_tool == "masrek-check-registry"
+
     def test_semgrep_not_needed_for_a03(self):
         from app.checks import checks_need_sast_tool
         assert checks_need_sast_tool(["A03"], "semgrep") is False
@@ -1299,3 +1456,262 @@ class TestGitleaksCheckRegistry:
     def test_gitleaks_not_needed_for_a03(self):
         from app.checks import checks_need_sast_tool
         assert checks_need_sast_tool(["A03"], "gitleaks") is False
+
+
+# ── Bug Fix Tests ────────────────────────────────────────────────────────────
+
+
+class TestOsvTrivyDedupe:
+    """BUG 1 FIX: osv+trivy findings for the same CVE must merge when
+    source_path is deeper than /app/source/."""
+
+    def test_same_cve_dedupes_with_deep_source_path(self):
+        """osv absolute path and trivy relative path produce same hash
+        when source_prefix is the actual scan directory."""
+        from app.models import compute_dedupe_hash
+
+        osv_loc = "minimist@1.2.5 (/app/source/vulnerable-app/package-lock.json)"
+        trivy_loc = "minimist@1.2.5 (package-lock.json)"
+        source = "/app/source/vulnerable-app"
+
+        h_osv = compute_dedupe_hash("A03:2025", osv_loc, "CVE-2021-44906: minimist", source)
+        h_trivy = compute_dedupe_hash("A03:2025", trivy_loc, "CVE-2021-44906: minimist", source)
+        assert h_osv == h_trivy
+
+    def test_same_cve_dedupes_with_shallow_source_path(self):
+        """Still works when source_path is exactly /app/source/."""
+        from app.models import compute_dedupe_hash
+
+        osv_loc = "minimist@1.2.5 (/app/source/package-lock.json)"
+        trivy_loc = "minimist@1.2.5 (package-lock.json)"
+
+        h_osv = compute_dedupe_hash("A03:2025", osv_loc, "CVE-2021-44906: minimist", "/app/source")
+        h_trivy = compute_dedupe_hash("A03:2025", trivy_loc, "CVE-2021-44906: minimist", "/app/source")
+        assert h_osv == h_trivy
+
+    def test_different_files_still_differ(self):
+        """Two different lockfiles should NOT dedupe."""
+        from app.models import compute_dedupe_hash
+
+        loc_a = "minimist@1.2.5 (/app/source/app-a/package-lock.json)"
+        loc_b = "minimist@1.2.5 (/app/source/app-b/package-lock.json)"
+        source = "/app/source"
+
+        h_a = compute_dedupe_hash("A03:2025", loc_a, "CVE-2021-44906: minimist", source)
+        h_b = compute_dedupe_hash("A03:2025", loc_b, "CVE-2021-44906: minimist", source)
+        assert h_a != h_b
+
+    def test_merged_finding_has_both_tools(self):
+        """When osv+trivy hash-collide, _insert_findings unions source_tools."""
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        from app.models import ParsedFinding
+        from app.scanner import _insert_findings
+        from app.database import init_db, get_db
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "test.db")
+            init_db(db_path)
+
+            run_id = "test-dedupe-run"
+            with get_db(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO runs (id, target_url, target_host, mode, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (run_id, "source://test", "test", "sast", "running", "2026-01-01T00:00:00Z"),
+                )
+
+            osv_finding = ParsedFinding(
+                severity="critical",
+                title="CVE-2021-44906: minimist (npm)",
+                category="A03:2025",
+                category_name="Software Supply Chain Failures",
+                location="minimist@1.2.5 (/app/source/vulnerable-app/package-lock.json)",
+                evidence="IDs: CVE-2021-44906",
+                verified="yes",
+                fix="Upgrade minimist to 1.2.6.",
+                source_tool="osv-scanner",
+            )
+            trivy_finding = ParsedFinding(
+                severity="critical",
+                title="CVE-2021-44906: minimist (npm)",
+                category="A03:2025",
+                category_name="Software Supply Chain Failures",
+                location="minimist@1.2.5 (package-lock.json)",
+                evidence="ID: CVE-2021-44906",
+                verified="yes",
+                fix="Upgrade minimist to 1.2.6.",
+                source_tool="trivy",
+            )
+
+            _insert_findings(run_id, [osv_finding, trivy_finding], db_path,
+                             source_prefix="/app/source/vulnerable-app")
+
+            with get_db(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT * FROM findings WHERE run_id = ?", (run_id,)
+                ).fetchall()
+
+            assert len(rows) == 1, f"Expected 1 merged finding, got {len(rows)}"
+            assert rows[0]["source_tool"] == "osv-scanner,trivy"
+
+    def test_normalize_strips_actual_source_prefix(self):
+        from app.models import normalize_location
+
+        loc = "/app/source/vulnerable-app/subdir/file.py:10"
+        result = normalize_location(loc, source_prefix="/app/source/vulnerable-app")
+        assert result == "subdir/file.py:10"
+
+    def test_normalize_strips_generic_prefix_as_fallback(self):
+        from app.models import normalize_location
+
+        loc = "/app/source/file.py:10"
+        result = normalize_location(loc)
+        assert result == "file.py:10"
+
+    def test_normalize_no_source_prefix_leaves_relative_path(self):
+        from app.models import normalize_location
+
+        assert normalize_location("package-lock.json") == "package-lock.json"
+
+
+class TestOwaspTagTranslation:
+    """BUG 2 FIX: semgrep OWASP tag mapping must translate 2021 numbers
+    to the 2025 taxonomy, not copy the bare number across editions."""
+
+    def test_2021_a03_injection_maps_to_2025_a05(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A03:2021 - Injection"]}
+        assert _extract_owasp_from_metadata(metadata) == "A05:2025"
+
+    def test_2021_a01_access_control_maps_to_2025_a01(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A01:2021 - Broken Access Control"]}
+        assert _extract_owasp_from_metadata(metadata) == "A01:2025"
+
+    def test_2021_a02_crypto_maps_to_2025_a04(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A02:2021 - Cryptographic Failures"]}
+        assert _extract_owasp_from_metadata(metadata) == "A04:2025"
+
+    def test_2021_a05_misconfig_maps_to_2025_a02(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A05:2021 - Security Misconfiguration"]}
+        assert _extract_owasp_from_metadata(metadata) == "A02:2025"
+
+    def test_2017_a01_injection_maps_to_2025_a05(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A1:2017 - Injection"]}
+        assert _extract_owasp_from_metadata(metadata) == "A05:2025"
+
+    def test_2025_tag_passes_through(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A05:2025"]}
+        assert _extract_owasp_from_metadata(metadata) == "A05:2025"
+
+    def test_bare_tag_assumes_2021(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A03"]}
+        assert _extract_owasp_from_metadata(metadata) == "A05:2025"
+
+    def test_eval_finding_maps_to_a05_via_tag(self, tmp_path):
+        """An eval-detected finding with OWASP A03:2021 tag must land in A05:2025."""
+        import json
+        from app.parsers.semgrep import parse
+
+        semgrep_data = {
+            "results": [{
+                "check_id": "python.lang.security.audit.eval-detected",
+                "path": "test.py",
+                "start": {"line": 5},
+                "end": {"line": 5},
+                "extra": {
+                    "severity": "WARNING",
+                    "message": "Detected the use of eval().",
+                    "metadata": {
+                        "owasp": ["A03:2021 - Injection"],
+                        "cwe": ["CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"],
+                    },
+                },
+            }],
+            "errors": [],
+        }
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(semgrep_data))
+        findings = parse(f, "test")
+        assert len(findings) == 1
+        assert findings[0].category == "A05:2025", (
+            f"eval finding should be A05:2025 (Injection), got {findings[0].category}"
+        )
+
+    def test_bandit_b307_eval_maps_to_a05(self, tmp_path):
+        """bandit B307 eval() with OWASP A03:2021 tag must land in A05:2025."""
+        import json
+        from app.parsers.semgrep import parse
+
+        semgrep_data = {
+            "results": [{
+                "check_id": "python.lang.security.audit.exec-detected",
+                "path": "test.py",
+                "start": {"line": 10},
+                "end": {"line": 10},
+                "extra": {
+                    "severity": "WARNING",
+                    "message": "Use of exec().",
+                    "metadata": {
+                        "owasp": ["A03:2021 - Injection"],
+                    },
+                },
+            }],
+            "errors": [],
+        }
+        f = tmp_path / "semgrep.json"
+        f.write_text(json.dumps(semgrep_data))
+        findings = parse(f, "test")
+        assert len(findings) == 1
+        assert findings[0].category == "A05:2025"
+
+    def test_2021_a06_vuln_components_maps_to_2025_a03_supply_chain(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A06:2021 - Vulnerable and Outdated Components"]}
+        assert _extract_owasp_from_metadata(metadata) == "A03:2025"
+
+    def test_2021_a10_ssrf_maps_to_2025_a05_injection(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A10:2021 - Server-Side Request Forgery"]}
+        assert _extract_owasp_from_metadata(metadata) == "A05:2025"
+
+    def test_2017_a03_sensitive_data_maps_to_2025_a04_crypto(self):
+        from app.parsers.semgrep import _extract_owasp_from_metadata
+        metadata = {"owasp": ["A3:2017 - Sensitive Data Exposure"]}
+        assert _extract_owasp_from_metadata(metadata) == "A04:2025"
+
+    def test_2021_mapping_table_complete(self):
+        """All 10 OWASP 2021 entries must have a mapping."""
+        from app.parsers.semgrep import _OWASP_2021_TO_2025
+        for i in range(1, 11):
+            assert i in _OWASP_2021_TO_2025, f"Missing 2021 A{i:02d} mapping"
+
+    def test_2017_mapping_table_complete(self):
+        """All 10 OWASP 2017 entries must have a mapping."""
+        from app.parsers.semgrep import _OWASP_2017_TO_2025
+        for i in range(1, 11):
+            assert i in _OWASP_2017_TO_2025, f"Missing 2017 A{i:02d} mapping"
+
+    def test_2021_table_maps_by_meaning_not_number(self):
+        """Every 2021 row must map to the correct 2025 category by theme."""
+        from app.parsers.semgrep import _OWASP_2021_TO_2025
+        expected = {
+            1: 1,   # Broken Access Control → Broken Access Control
+            2: 4,   # Cryptographic Failures → Cryptographic Failures
+            3: 5,   # Injection → Injection
+            4: 6,   # Insecure Design → Insecure Design
+            5: 2,   # Security Misconfiguration → Security Misconfiguration
+            6: 3,   # Vulnerable Components → Supply Chain
+            7: 7,   # Auth Failures → Auth Failures
+            8: 8,   # Integrity Failures → Integrity Failures
+            9: 9,   # Logging Failures → Logging Failures
+            10: 5,  # SSRF → Injection
+        }
+        assert _OWASP_2021_TO_2025 == expected

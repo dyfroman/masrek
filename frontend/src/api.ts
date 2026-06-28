@@ -166,6 +166,24 @@ export const api = {
         ...(checks && checks.length > 0 ? { checks } : {}),
       }),
     }),
+  scanCombined: (
+    target_url: string,
+    source_path: string,
+    mode: string = "auto",
+    checks?: string[],
+    scan_type: "baseline" | "full" = "baseline",
+  ) =>
+    req<ScanResponse>("/scan", {
+      method: "POST",
+      body: JSON.stringify({
+        target_type: "combined",
+        target_url,
+        source_path,
+        mode,
+        scan_type,
+        ...(checks && checks.length > 0 ? { checks } : {}),
+      }),
+    }),
   listRuns: () => req<Run[]>("/runs"),
   getRun: (id: string) => req<RunDetail>(`/runs/${id}`),
   getDiff: (id: string) => req<DiffResponse>(`/runs/${id}/diff`),

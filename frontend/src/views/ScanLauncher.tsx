@@ -17,7 +17,7 @@ const DETECT_BADGE: Record<string, { label: string; color: string }> = {
 };
 
 export default function ScanLauncher() {
-  const [targetType, setTargetType] = useState<"url" | "source">("url");
+  const [targetType, setTargetType] = useState<"url" | "source" | "combined">("url");
   const [url, setUrl] = useState("https://juice-shop.herokuapp.com");
   const [sourcePath, setSourcePath] = useState("/app/source");
   const [scope, setScope] = useState<ScopeCheck | null>(null);
@@ -48,9 +48,12 @@ export default function ScanLauncher() {
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => checkScope(url), 400);
-    return () => clearTimeout(timer);
-  }, [url, checkScope]);
+    if (targetType === "url" || targetType === "combined") {
+      const timer = setTimeout(() => checkScope(url), 400);
+      return () => clearTimeout(timer);
+    }
+    setScope(null);
+  }, [url, targetType, checkScope]);
 
   const applyPreset = (p: Preset) => {
     setPreset(p);
@@ -75,7 +78,9 @@ export default function ScanLauncher() {
     try {
       const checks = [...selectedChecks].sort();
       let res;
-      if (targetType === "source") {
+      if (targetType === "combined") {
+        res = await api.scanCombined(url.trim(), sourcePath.trim(), "auto", checks, scanType);
+      } else if (targetType === "source") {
         res = await api.scanSource(sourcePath.trim(), checks);
       } else {
         res = await api.scan(url.trim(), "auto", checks, scanType);
@@ -102,6 +107,7 @@ export default function ScanLauncher() {
         {([
           { key: "url" as const, label: "URL (DAST)", desc: "סריקת יעד חי" },
           { key: "source" as const, label: "קוד מקור (SAST/SCA)", desc: "סריקת קוד מקור" },
+          { key: "combined" as const, label: "משולב (DAST+SAST)", desc: "כיסוי מלא — URL + קוד" },
         ]).map((opt) => (
           <button
             key={opt.key}
@@ -124,45 +130,83 @@ export default function ScanLauncher() {
 
       {/* Target input */}
       <div className="space-y-2">
-        <label htmlFor="target-input" className="block text-sm text-text-secondary">
-          {targetType === "url" ? "כתובת יעד" : "נתיב קוד מקור"}
-        </label>
-        <div className="flex gap-3">
-          {targetType === "url" ? (
+        {targetType === "combined" ? (
+          <>
+            <label htmlFor="target-url" className="block text-sm text-text-secondary">כתובת יעד (DAST)</label>
             <input
-              id="target-input"
+              id="target-url"
               type="url"
               dir="ltr"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="http://localhost:3000"
-              className="flex-1 bg-surface-card border border-surface-border rounded px-4 py-2.5 text-text-primary font-mono text-sm placeholder:text-text-muted focus:border-accent-primary focus:outline-none transition-colors"
+              className="w-full bg-surface-card border border-surface-border rounded px-4 py-2.5 text-text-primary font-mono text-sm placeholder:text-text-muted focus:border-accent-primary focus:outline-none transition-colors"
               aria-describedby="scope-status"
             />
-          ) : (
-            <input
-              id="target-input"
-              type="text"
-              dir="ltr"
-              value={sourcePath}
-              onChange={(e) => setSourcePath(e.target.value)}
-              placeholder="/app/source"
-              className="flex-1 bg-surface-card border border-surface-border rounded px-4 py-2.5 text-text-primary font-mono text-sm placeholder:text-text-muted focus:border-accent-primary focus:outline-none transition-colors"
-            />
-          )}
-          <button
-            onClick={handleScan}
-            disabled={scanning || (targetType === "url" ? !url.trim() : !sourcePath.trim()) || selectedChecks.size === 0}
-            className="px-6 py-2.5 bg-accent-primary text-surface-bg font-bold rounded hover:bg-accent-primary/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            aria-label="התחל סריקה"
-          >
-            {scanning ? "מפעיל..." : "סרוק"}
-          </button>
-        </div>
+            <label htmlFor="target-source" className="block text-sm text-text-secondary mt-2">נתיב קוד מקור (SAST)</label>
+            <div className="flex gap-3">
+              <input
+                id="target-source"
+                type="text"
+                dir="ltr"
+                value={sourcePath}
+                onChange={(e) => setSourcePath(e.target.value)}
+                placeholder="/app/source/vulnerable-app"
+                className="flex-1 bg-surface-card border border-surface-border rounded px-4 py-2.5 text-text-primary font-mono text-sm placeholder:text-text-muted focus:border-accent-primary focus:outline-none transition-colors"
+              />
+              <button
+                onClick={handleScan}
+                disabled={scanning || !url.trim() || !sourcePath.trim() || selectedChecks.size === 0}
+                className="px-6 py-2.5 bg-accent-primary text-surface-bg font-bold rounded hover:bg-accent-primary/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                aria-label="התחל סריקה משולבת"
+              >
+                {scanning ? "מפעיל..." : "סרוק"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <label htmlFor="target-input" className="block text-sm text-text-secondary">
+              {targetType === "url" ? "כתובת יעד" : "נתיב קוד מקור"}
+            </label>
+            <div className="flex gap-3">
+              {targetType === "url" ? (
+                <input
+                  id="target-input"
+                  type="url"
+                  dir="ltr"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="http://localhost:3000"
+                  className="flex-1 bg-surface-card border border-surface-border rounded px-4 py-2.5 text-text-primary font-mono text-sm placeholder:text-text-muted focus:border-accent-primary focus:outline-none transition-colors"
+                  aria-describedby="scope-status"
+                />
+              ) : (
+                <input
+                  id="target-input"
+                  type="text"
+                  dir="ltr"
+                  value={sourcePath}
+                  onChange={(e) => setSourcePath(e.target.value)}
+                  placeholder="/app/source"
+                  className="flex-1 bg-surface-card border border-surface-border rounded px-4 py-2.5 text-text-primary font-mono text-sm placeholder:text-text-muted focus:border-accent-primary focus:outline-none transition-colors"
+                />
+              )}
+              <button
+                onClick={handleScan}
+                disabled={scanning || (targetType === "url" ? !url.trim() : !sourcePath.trim()) || selectedChecks.size === 0}
+                className="px-6 py-2.5 bg-accent-primary text-surface-bg font-bold rounded hover:bg-accent-primary/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                aria-label="התחל סריקה"
+              >
+                {scanning ? "מפעיל..." : "סרוק"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Scope badge — driven ONLY by GET /scope/check (URL mode only) */}
-      {targetType === "url" && <div id="scope-status" aria-live="polite">
+      {/* Scope badge — driven ONLY by GET /scope/check (URL and combined modes) */}
+      {(targetType === "url" || targetType === "combined") && <div id="scope-status" aria-live="polite">
         {scopeLoading && (
           <span className="text-sm text-text-muted">בודק הרשאה...</span>
         )}
@@ -190,6 +234,13 @@ export default function ScanLauncher() {
       {targetType === "source" && (
         <div className="bg-accent-primary/5 border border-accent-primary/20 rounded p-3 text-sm text-text-secondary">
           סריקת SAST/SCA — ניתוח קוד מקור בלבד. הנתיב חייב להיות מותר ב-SCOPE.md (קריאה בלבד, ללא הרצת קוד).
+        </div>
+      )}
+
+      {/* Combined mode info */}
+      {targetType === "combined" && (
+        <div className="bg-accent-success/5 border border-accent-success/20 rounded p-3 text-sm text-text-secondary">
+          סריקה משולבת DAST+SAST — כיסוי מלא של OWASP Top 10. הכתובת חייבת להיות ב-SCOPE.md והנתיב חייב להיות מותר.
         </div>
       )}
 
@@ -227,7 +278,7 @@ export default function ScanLauncher() {
             const check = OWASP_CHECKS[key];
             const id = check.id;
             const checked = selectedChecks.has(id);
-            const effectiveDetect = targetType === "source" ? check.sastDetectability : check.detectability;
+            const effectiveDetect = targetType === "combined" ? check.combinedDetectability : targetType === "source" ? check.sastDetectability : check.detectability;
             const badge = DETECT_BADGE[effectiveDetect];
             return (
               <label
@@ -267,8 +318,8 @@ export default function ScanLauncher() {
         )}
       </div>
 
-      {/* Scan type toggle (URL/DAST mode only) */}
-      {targetType === "url" && <div className="bg-surface-card border border-surface-border rounded p-4 space-y-2">
+      {/* Scan type toggle (URL/DAST and combined mode) */}
+      {(targetType === "url" || targetType === "combined") && <div className="bg-surface-card border border-surface-border rounded p-4 space-y-2">
         <span className="text-sm font-bold text-text-primary">עומק סריקה</span>
         <div className="flex gap-3 mt-2">
           {(
@@ -312,7 +363,7 @@ export default function ScanLauncher() {
       </div>}
 
       {/* Passive-only banner */}
-      {targetType === "url" && isPassive && (
+      {(targetType === "url" || targetType === "combined") && isPassive && (
         <div className="bg-surface-card border border-surface-border rounded p-4 space-y-2">
           <p className="text-sm text-text-secondary">
             רק בדיקות לא-פולשניות ירוצו (כותרות HTTP, TLS, robots.txt).

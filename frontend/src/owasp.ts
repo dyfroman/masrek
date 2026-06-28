@@ -4,6 +4,7 @@ export interface OwaspCheck {
   nameHe: string;
   detectability: "full" | "partial" | "none";
   sastDetectability: "full" | "partial" | "none";
+  combinedDetectability: "full" | "partial" | "none";
   reasonHe: string;
   sastReasonHe: string;
 }
@@ -15,6 +16,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "בקרת גישה לקויה",
     detectability: "full",
     sastDetectability: "none",
+    combinedDetectability: "full",
     reasonHe: "סריקת ZAP לגישה לא מורשית + תבניות nuclei לחשיפת מידע",
     sastReasonHe: "לא ניתן לזהות באמצעות SAST — נדרש DAST",
   },
@@ -24,6 +26,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "תצורת אבטחה שגויה",
     detectability: "full",
     sastDetectability: "partial",
+    combinedDetectability: "full",
     reasonHe: "ניתוח כותרות HTTP, nikto, חוקי תצורה של ZAP, ו-testssl.sh",
     sastReasonHe: "semgrep מזהה תצורה שגויה בקוד + gitleaks מוצא סודות חשופים בקבצי תצורה. תצורת שרת/ריצה דורשת DAST.",
   },
@@ -33,6 +36,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "כשלי שרשרת אספקת תוכנה",
     detectability: "none",
     sastDetectability: "full",
+    combinedDetectability: "full",
     reasonHe: "לא ניתן לזהות באמצעות DAST — נדרש SAST/SCA על קוד המקור",
     sastReasonHe: "osv-scanner + trivy בודקים קבצי נעילה ותלויות מול מסדי נתוני פגיעויות לזיהוי CVE ידועים.",
   },
@@ -42,6 +46,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "כשלים קריפטוגרפיים",
     detectability: "partial",
     sastDetectability: "none",
+    combinedDetectability: "partial",
     reasonHe: "testssl.sh בודק TLS; ZAP מוצא עוגיות לא מאובטחות. לא בודק קריפטוגרפיה פנימית.",
     sastReasonHe: "לא ניתן לזהות באמצעות SAST — נדרש DAST",
   },
@@ -51,6 +56,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "הזרקה",
     detectability: "full",
     sastDetectability: "full",
+    combinedDetectability: "full",
     reasonHe: "חוקי הזרקה פעילים של ZAP (SQLi, XSS, הזרקת פקודות) + תבניות nuclei",
     sastReasonHe: "semgrep מזהה דפוסי הזרקה בקוד מקור (SQLi, XSS, הזרקת פקודות, SSTI).",
   },
@@ -60,6 +66,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "עיצוב לא מאובטח",
     detectability: "none",
     sastDetectability: "partial",
+    combinedDetectability: "partial",
     reasonHe: "פגמי עיצוב ארכיטקטוניים — לא ניתנים לזיהוי בסריקה אוטומטית",
     sastReasonHe: "semgrep מזהה דפוסי עיצוב לא מאובטח בקוד בלבד (eval, deserialization לא מאובטח). פגמי עיצוב ארכיטקטוניים דורשים סקירה ידנית.",
   },
@@ -69,6 +76,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "כשלי אימות",
     detectability: "partial",
     sastDetectability: "partial",
+    combinedDetectability: "partial",
     reasonHe: "בדיקות אימות ZAP, תבניות nuclei לסיסמאות ברירת מחדל. לא בודק כל לוגיקת אימות.",
     sastReasonHe: "semgrep + gitleaks מזהים סיסמאות, מפתחות API וטוקנים מוטמעים בקוד מקור. פגמי לוגיקת אימות דורשים DAST + סקירה ידנית.",
   },
@@ -78,6 +86,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "כשלי שלמות תוכנה ונתונים",
     detectability: "none",
     sastDetectability: "partial",
+    combinedDetectability: "partial",
     reasonHe: "בעיקר נוגע ל-CI/CD ותהליך הבנייה. לא ניתן לבדיקה מספקת באמצעות DAST.",
     sastReasonHe: "trivy מכסה שלמות תלויות ותצורת IaC/CI שגויה. זיוף מערכת הבנייה/צינור CI ו-SRI דורשים סקירה ידנית.",
   },
@@ -87,6 +96,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "כשלי רישום והתראות אבטחה",
     detectability: "none",
     sastDetectability: "partial",
+    combinedDetectability: "partial",
     reasonHe: "לא ניתן לבדוק רישום מבחוץ — נדרשת גישה ללוגים ותצורת SIEM.",
     sastReasonHe: "semgrep מזהה דפוסי רישום חסרים ומידע רגיש ביומנים. כיסוי רישום מלא דורש גישת ריצה + סקירת SIEM.",
   },
@@ -96,6 +106,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     nameHe: "טיפול שגוי בחריגים",
     detectability: "partial",
     sastDetectability: "none",
+    combinedDetectability: "partial",
     reasonHe: "חוקי ZAP לחשיפת שגיאות + stack traces. לא מזהה כל פער בטיפול בחריגים.",
     sastReasonHe: "לא ניתן לזהות באמצעות SAST — נדרש DAST",
   },

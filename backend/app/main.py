@@ -24,7 +24,7 @@ from .models import (
     ScopeResponse,
 )
 from .models import TargetType
-from .scanner import ScanRefusedError, reconcile_orphaned_runs, start_scan, start_source_scan
+from .scanner import ScanRefusedError, reconcile_orphaned_runs, start_scan, start_source_scan, start_combined_scan
 from .scope import SourcePathError, parse_scope, is_in_scope
 from .target_validation import TargetValidationError
 
@@ -97,6 +97,38 @@ async def check_scope(url: str = Query(..., description="Target URL to check")):
 
 @app.post("/scan", status_code=202, dependencies=[Depends(require_auth)])
 async def create_scan(req: ScanRequest):
+    if req.target_type == TargetType.combined:
+        if not req.target_url:
+            raise HTTPException(
+                status_code=400,
+                detail="target_url is required for combined scan.",
+            )
+        if not req.source_path:
+            raise HTTPException(
+                status_code=400,
+                detail="source_path is required for combined scan.",
+            )
+        try:
+            run_id, resolved_mode = start_combined_scan(
+                req.target_url, req.source_path,
+                mode=req.mode, checks=req.checks,
+                scan_type=req.scan_type,
+            )
+        except TargetValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except ScanRefusedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except SourcePathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "run_id": run_id,
+            "target_type": "combined",
+            "target_url": req.target_url,
+            "source_path": req.source_path,
+            "mode": resolved_mode,
+            "status": "queued",
+        }
+
     if req.target_type == TargetType.source:
         if not req.source_path:
             raise HTTPException(

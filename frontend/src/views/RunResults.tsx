@@ -425,7 +425,7 @@ function OwaspTab({
         const check = OWASP_CHECKS[key];
         const count = counts[key] ?? 0;
         const pct = (count / maxCount) * 100;
-        const effectiveDetectability = targetType === "source" ? check.sastDetectability : check.detectability;
+        const effectiveDetectability = targetType === "combined" ? check.combinedDetectability : targetType === "source" ? check.sastDetectability : check.detectability;
         const detect = DETECT_LABELS[effectiveDetectability];
         const isSelected = selectedSet ? selectedSet.has(check.id) : true;
         const status = categoryStatus(count, effectiveDetectability, isSelected, scanType, runStatus);

@@ -84,6 +84,7 @@ class ScanType(str, Enum):
 class TargetType(str, Enum):
     url = "url"
     source = "source"
+    combined = "combined"
 
 
 class ScanRequest(BaseModel):
@@ -182,7 +183,7 @@ class ParsedFinding:
 _SOURCE_PREFIX_RE = re.compile(r"/app/source/")
 
 
-def normalize_location(url: str) -> str:
+def normalize_location(url: str, source_prefix: str | None = None) -> str:
     """Normalize a URL or file-path location for dedup.
 
     C2 decision: keep query parameter NAMES but zero their VALUES so that the
@@ -191,10 +192,16 @@ def normalize_location(url: str) -> str:
     duplicate findings. The param name is kept because ?q= and ?search= may
     be genuinely different injection points.
 
-    For SAST findings, strip the /app/source/ mount prefix so tools that use
-    absolute vs relative paths (osv-scanner vs trivy) still dedupe correctly.
+    For SAST findings, strip the actual source_path prefix (e.g.
+    /app/source/vulnerable-app/) so tools that use absolute vs relative paths
+    (osv-scanner vs trivy) dedupe correctly regardless of mount depth.
+    Falls back to stripping the generic /app/source/ prefix.
     """
-    loc = _SOURCE_PREFIX_RE.sub("", url)
+    loc = url
+    if source_prefix:
+        sp = source_prefix.rstrip("/") + "/"
+        loc = loc.replace(sp, "")
+    loc = _SOURCE_PREFIX_RE.sub("", loc)
     parsed = urlparse(loc)
     if not parsed.query:
         return loc.lower().rstrip("/")
@@ -221,8 +228,11 @@ def _normalize_text(s: str) -> str:
     return _NORMALIZE_RE.sub("", s.lower().strip())
 
 
-def compute_dedupe_hash(owasp_category: str, location: str, title: str) -> str:
-    norm_loc = normalize_location(location)
+def compute_dedupe_hash(
+    owasp_category: str, location: str, title: str,
+    source_prefix: str | None = None,
+) -> str:
+    norm_loc = normalize_location(location, source_prefix)
     key = f"{_normalize_text(owasp_category)}|{_normalize_text(norm_loc)}|{_normalize_text(title)}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 

@@ -29,6 +29,7 @@ from .checks import (
     ALL_CHECK_IDS, CHECKS,
     get_not_testable_checks, get_partial_checks,
     get_sast_not_testable_checks, get_sast_partial_checks,
+    get_combined_not_testable_checks, get_combined_partial_checks,
 )
 from .database import get_db
 from .models import (
@@ -192,6 +193,214 @@ def start_source_scan(
     return run_id
 
 
+def start_combined_scan(
+    target_url: str,
+    source_path: str,
+    mode: ScanMode = ScanMode.auto,
+    checks: list[str] | None = None,
+    scan_type: ScanType = ScanType.baseline,
+    scope: ScopeConfig | None = None,
+    db_path: str | None = None,
+) -> tuple[str, str]:
+    """Validate both URL + source, create one run, launch combined DAST+SAST.
+
+    Returns (run_id, resolved_mode). Both URL scope AND source path are validated.
+    """
+    if scope is None:
+        scope = parse_scope()
+
+    selected_checks = checks or ALL_CHECK_IDS
+
+    validation = validate_target(target_url, scope)
+    resolved = resolve_mode(mode, target_url, scope)
+
+    if resolved == "active" and not is_in_scope(target_url, scope):
+        raise ScanRefusedError(
+            f"Active scanning of '{target_url}' is not authorized. "
+            "Host is not in SCOPE.md allowlist. Only passive checks are available."
+        )
+
+    resolved_source = validate_source_path(source_path, scope)
+
+    run_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    host = _safe_host(target_url)
+
+    with get_db(db_path) as conn:
+        conn.execute(
+            "INSERT INTO runs (id, target_url, target_host, mode, status, created_at, "
+            "selected_checks, scan_type, target_type, source_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, target_url, host, resolved, RunStatus.queued.value, now,
+             ",".join(selected_checks), scan_type.value, "combined",
+             str(resolved_source)),
+        )
+
+    thread = threading.Thread(
+        target=_run_combined_scan,
+        args=(run_id, target_url, resolved, scope, validation,
+              resolved_source, selected_checks, scan_type, db_path),
+        daemon=True,
+    )
+    thread.start()
+
+    return run_id, resolved
+
+
+def _run_combined_scan(
+    run_id: str,
+    target_url: str,
+    mode: str,
+    scope: ScopeConfig,
+    validation: ValidationResult,
+    source_path: Path,
+    selected_checks: list[str],
+    scan_type: ScanType,
+    db_path: str | None,
+) -> None:
+    """Run DAST (run-all.sh) then SAST (run-sast.sh), merge into one finding set."""
+    per_tool_timeout = scope.safety.max_scan_minutes * 60
+    dast_timeout = per_tool_timeout * 3 if scan_type == ScanType.full else per_tool_timeout * 2
+    sast_timeout = per_tool_timeout * 2
+
+    with get_db(db_path) as conn:
+        conn.execute(
+            "UPDATE runs SET status = ? WHERE id = ?",
+            (RunStatus.running.value, run_id),
+        )
+
+    is_windows = os.name == "nt"
+    popen_kwargs: dict = {}
+    if not is_windows:
+        popen_kwargs["start_new_session"] = True
+
+    all_findings: list[ParsedFinding] = []
+    errors: list[str] = []
+    dast_ok = False
+    sast_ok = False
+
+    # ── Phase 1: DAST ──
+    dast_cmd = [
+        "bash", str(_SCRIPT_PATH),
+        "--target", target_url,
+        "--mode", mode,
+        "--checks", ",".join(selected_checks),
+        "--scan-type", scan_type.value,
+    ]
+    if validation.pinned_ip:
+        dast_cmd.extend(["--pinned-ip", validation.pinned_ip])
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            dast_cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, shell=False, **popen_kwargs,
+        )
+        stdout, stderr = proc.communicate(timeout=dast_timeout)
+        if proc.returncode == 0:
+            dast_ok = True
+        else:
+            errors.append(f"DAST: {_sanitize_error(stderr)}")
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            _kill_process_tree(proc, is_windows)
+        errors.append(f"DAST timed out after {scope.safety.max_scan_minutes} min")
+        dast_ok = True
+        logger.warning("Combined run %s: DAST timed out", run_id)
+    except Exception as exc:
+        errors.append(f"DAST failed: {_sanitize_error(str(exc))}")
+        logger.exception("Combined run %s: DAST failed", run_id)
+
+    if dast_ok:
+        try:
+            results_dir = _find_results_dir(target_url)
+            if results_dir:
+                dast_findings = _parse_all_results(results_dir, mode)
+                selected_cats = {f"{cid}:2025" for cid in selected_checks}
+                dast_findings = [f for f in dast_findings if f.category in selected_cats]
+                all_findings.extend(dast_findings)
+
+                with get_db(db_path) as conn:
+                    conn.execute(
+                        "UPDATE runs SET results_dir = ? WHERE id = ?",
+                        (str(results_dir), run_id),
+                    )
+        except Exception as exc:
+            errors.append(f"DAST parse failed: {_sanitize_error(str(exc))}")
+            logger.exception("Combined run %s: DAST parse failed", run_id)
+
+    # ── Phase 2: SAST ──
+    source_name = _safe_host(f"source://{source_path.name}")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    sast_results_dir = _RESULTS_BASE / source_name / ts / "sast"
+
+    sast_cmd = [
+        "bash", str(_SAST_SCRIPT_PATH),
+        "--source", str(source_path),
+        "--checks", ",".join(selected_checks),
+        "--results-dir", str(sast_results_dir),
+        "--max-minutes", str(scope.safety.max_scan_minutes),
+    ]
+
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            sast_cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, shell=False, **popen_kwargs,
+        )
+        stdout, stderr = proc.communicate(timeout=sast_timeout)
+        if proc.returncode == 0:
+            sast_ok = True
+        else:
+            errors.append(f"SAST: {_sanitize_error(stderr)}")
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            _kill_process_tree(proc, is_windows)
+        errors.append(f"SAST timed out after {scope.safety.max_scan_minutes} min")
+        sast_ok = True
+        logger.warning("Combined run %s: SAST timed out", run_id)
+    except Exception as exc:
+        errors.append(f"SAST failed: {_sanitize_error(str(exc))}")
+        logger.exception("Combined run %s: SAST failed", run_id)
+
+    if sast_ok:
+        try:
+            if sast_results_dir.exists():
+                sast_findings = _parse_sast_results(sast_results_dir)
+                selected_cats = {f"{cid}:2025" for cid in selected_checks}
+                sast_findings = [f for f in sast_findings if f.category in selected_cats]
+                all_findings.extend(sast_findings)
+        except Exception as exc:
+            errors.append(f"SAST parse failed: {_sanitize_error(str(exc))}")
+            logger.exception("Combined run %s: SAST parse failed", run_id)
+
+    # ── Merge + detectability ──
+    summary_json = None
+    status = RunStatus.done if (dast_ok or sast_ok) else RunStatus.failed
+
+    if status == RunStatus.done:
+        try:
+            all_findings.extend(_generate_combined_detectability_findings(
+                selected_checks, target_url, str(source_path),
+            ))
+            _insert_findings(run_id, all_findings, db_path, source_prefix=str(source_path))
+            summary_json = _compute_summary(run_id, db_path)
+        except Exception as exc:
+            errors.append(f"Merge failed: {_sanitize_error(str(exc))}")
+            logger.exception("Combined run %s: merge failed", run_id)
+
+    error_msg = " | ".join(errors) if errors else None
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db(db_path) as conn:
+        conn.execute(
+            "UPDATE runs SET status = ?, completed_at = ?, error_message = ?, summary_json = ? "
+            "WHERE id = ?",
+            (status.value, now, error_msg, summary_json, run_id),
+        )
+
+
 def _run_sast_scan(
     run_id: str,
     source_path: Path,
@@ -267,7 +476,7 @@ def _run_sast_scan(
                     selected_checks, str(source_path),
                 ))
 
-                _insert_findings(run_id, findings, db_path)
+                _insert_findings(run_id, findings, db_path, source_prefix=str(source_path))
                 summary_json = _compute_summary(run_id, db_path)
 
                 with get_db(db_path) as conn:
@@ -480,6 +689,7 @@ def _insert_findings(
     run_id: str,
     findings: list[ParsedFinding],
     db_path: str | None,
+    source_prefix: str | None = None,
 ) -> None:
     """Dedupe/merge findings and insert into the database.
 
@@ -489,7 +699,7 @@ def _insert_findings(
     merged: dict[str, dict] = {}
 
     for f in findings:
-        dhash = compute_dedupe_hash(f.category, f.location, f.title)
+        dhash = compute_dedupe_hash(f.category, f.location, f.title, source_prefix)
 
         if dhash in merged:
             existing = merged[dhash]
@@ -635,6 +845,47 @@ def _generate_sast_detectability_findings(
             verified="no",
             fix=f"SAST provides partial coverage for {check.id}. "
                 f"Complement with DAST and manual review.",
+            source_tool="masrek-check-registry",
+        ))
+
+    return findings
+
+
+def _generate_combined_detectability_findings(
+    selected_checks: list[str],
+    target_url: str,
+    source_path: str,
+) -> list[ParsedFinding]:
+    """Inject informational findings for checks that combined DAST+SAST cannot fully test."""
+    findings: list[ParsedFinding] = []
+
+    for check in get_combined_not_testable_checks(selected_checks):
+        cat = f"{check.id}:2025"
+        findings.append(ParsedFinding(
+            severity="info",
+            title=f"{check.id}: {check.name} — לא ניתן לבדיקה אוטומטית",
+            category=cat,
+            category_name=OWASP_NAMES.get(cat, check.name),
+            location=target_url,
+            evidence=f"Neither DAST nor SAST can test {check.id}. {check.reason}",
+            verified="no",
+            fix=f"Manual review required for {check.id} ({check.name}).",
+            source_tool="masrek-check-registry",
+        ))
+
+    for check in get_combined_partial_checks(selected_checks):
+        cat = f"{check.id}:2025"
+        reason = check.sast_reason or check.reason
+        findings.append(ParsedFinding(
+            severity="info",
+            title=f"{check.id}: {check.name} — כיסוי חלקי (DAST+SAST)",
+            category=cat,
+            category_name=OWASP_NAMES.get(cat, check.name),
+            location=target_url,
+            evidence=reason,
+            verified="no",
+            fix=f"Combined DAST+SAST provides partial coverage for {check.id}. "
+                f"Complement with manual review.",
             source_tool="masrek-check-registry",
         ))
 

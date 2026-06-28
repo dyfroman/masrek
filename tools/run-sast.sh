@@ -74,6 +74,11 @@ needs_sast_tool() {
             echo "$CHECKS" | grep -qE '(^|,)(A02|A05|A06|A07|A09)(,|$)'
             return $?
             ;;
+        gitleaks)
+            # A02: Misconfig (exposed secrets) + A07: Auth (hardcoded credentials)
+            echo "$CHECKS" | grep -qE '(^|,)(A02|A07)(,|$)'
+            return $?
+            ;;
         *)
             return 1
             ;;
@@ -255,6 +260,56 @@ except:
         fi
     else
         echo "│  WARNING: semgrep not installed, skipping."
+        ERRORS=$((ERRORS + 1))
+    fi
+    echo "└──────────────────────────────────────────────"
+fi
+
+# ── gitleaks (A02/A07: hardcoded secrets, API keys, credentials) ─────────────
+
+if needs_sast_tool "gitleaks"; then
+    echo ""
+    echo "┌── gitleaks (A02/A07: Hardcoded Secrets) ──"
+    GITLEAKS_OUT="$RESULTS_DIR/gitleaks.json"
+
+    if command -v gitleaks &>/dev/null; then
+        echo "│  Scanning $SOURCE_DIR for secrets ..."
+        # gitleaks exit code 1 = secrets found (not an error for us)
+        # `dir` subcommand scans a directory without git history (no --no-git needed)
+        # NOTE: gitleaks JSON output contains FULL secret values — treat as sensitive
+        set +e
+        timeout "${TOOL_TIMEOUT}s" gitleaks dir \
+            --report-format json --report-path "$GITLEAKS_OUT" --no-banner \
+            "$SOURCE_DIR" 2>/dev/null
+        GITLEAKS_EXIT=$?
+        set -e
+
+        if [[ $GITLEAKS_EXIT -eq 124 ]]; then
+            echo "│  WARNING: gitleaks timed out after ${MAX_MINUTES}m"
+            ERRORS=$((ERRORS + 1))
+        elif [[ $GITLEAKS_EXIT -eq 0 ]]; then
+            echo "│  No secrets found."
+        elif [[ $GITLEAKS_EXIT -eq 1 ]]; then
+            FINDING_COUNT=$(python3 -c "
+import json
+try:
+    data = json.load(open('$GITLEAKS_OUT'))
+    print(len(data) if isinstance(data, list) else '?')
+except:
+    print('?')
+" 2>/dev/null || echo "?")
+            echo "│  Found $FINDING_COUNT secret(s)."
+            echo "│  WARNING: Raw output contains secret values — do not expose."
+        else
+            echo "│  WARNING: gitleaks exited with code $GITLEAKS_EXIT"
+        fi
+
+        if [[ -f "$GITLEAKS_OUT" ]]; then
+            SIZE=$(stat -c%s "$GITLEAKS_OUT" 2>/dev/null || echo "0")
+            echo "│  Output: $GITLEAKS_OUT ($SIZE bytes)"
+        fi
+    else
+        echo "│  WARNING: gitleaks not installed, skipping."
         ERRORS=$((ERRORS + 1))
     fi
     echo "└──────────────────────────────────────────────"

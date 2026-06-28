@@ -25,7 +25,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     detectability: "full",
     sastDetectability: "partial",
     reasonHe: "ניתוח כותרות HTTP, nikto, חוקי תצורה של ZAP, ו-testssl.sh",
-    sastReasonHe: "semgrep מזהה תצורה שגויה בקוד (דגלי דיבאג, ברירות מחדל לא מאובטחות). תצורת שרת/ריצה דורשת DAST.",
+    sastReasonHe: "semgrep מזהה תצורה שגויה בקוד + gitleaks מוצא סודות חשופים בקבצי תצורה. תצורת שרת/ריצה דורשת DAST.",
   },
   "A03:2025": {
     id: "A03",
@@ -70,7 +70,7 @@ export const OWASP_CHECKS: Record<string, OwaspCheck> = {
     detectability: "partial",
     sastDetectability: "partial",
     reasonHe: "בדיקות אימות ZAP, תבניות nuclei לסיסמאות ברירת מחדל. לא בודק כל לוגיקת אימות.",
-    sastReasonHe: "semgrep מזהה סיסמאות ומפתחות מוטמעים בקוד מקור. פגמי לוגיקת אימות דורשים DAST + סקירה ידנית.",
+    sastReasonHe: "semgrep + gitleaks מזהים סיסמאות, מפתחות API וטוקנים מוטמעים בקוד מקור. פגמי לוגיקת אימות דורשים DAST + סקירה ידנית.",
   },
   "A08:2025": {
     id: "A08",

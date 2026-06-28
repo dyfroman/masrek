@@ -1092,3 +1092,210 @@ class TestSemgrepCheckRegistry:
         result = get_sast_partial_checks(["A09"])
         assert len(result) == 1
         assert result[0].id == "A09"
+
+
+class TestGitleaksParser:
+    """Verify gitleaks parser maps to A07/A02 with secret values redacted."""
+
+    GENERIC_SECRET = {
+        "RuleID": "generic-api-key",
+        "Description": "Generic API Key",
+        "File": "config/settings.py",
+        "StartLine": 5,
+        "Secret": "AKIAIOSFODNN7EXAMPLE",
+        "Match": "API_KEY = 'AKIAIOSFODNN7EXAMPLE'",
+        "Entropy": 3.42,
+    }
+
+    PASSWORD_SECRET = {
+        "RuleID": "hardcoded-password",
+        "Description": "Hardcoded Password",
+        "File": "vuln_secrets.py",
+        "StartLine": 4,
+        "Secret": "SuperSecret123!",
+        "Match": "DATABASE_PASSWORD = 'SuperSecret123!'",
+    }
+
+    CONFIG_SECRET = {
+        "RuleID": "aws-access-key-id",
+        "Description": "AWS Access Key ID",
+        "File": "deploy/config.yml",
+        "StartLine": 12,
+        "Secret": "AKIAIOSFODNN7EXAMPLE",
+        "Match": "aws_access_key_id: AKIAIOSFODNN7EXAMPLE",
+    }
+
+    def test_secret_maps_to_a07(self, tmp_path):
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.GENERIC_SECRET]))
+        findings = parse(f, "test")
+        assert len(findings) == 1
+        assert findings[0].category == "A07:2025"
+        assert findings[0].source_tool == "gitleaks"
+        assert findings[0].severity == "high"
+        assert findings[0].location == "config/settings.py:5"
+        assert findings[0].mapping == "exact"
+
+    def test_password_maps_to_a07(self, tmp_path):
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.PASSWORD_SECRET]))
+        findings = parse(f, "test")
+        assert findings[0].category == "A07:2025"
+
+    def test_secret_value_fully_redacted(self, tmp_path):
+        """CRITICAL: raw secret value must NEVER appear in any finding field."""
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.GENERIC_SECRET]))
+        findings = parse(f, "test")
+        finding = findings[0]
+        full = json.dumps({
+            "title": finding.title,
+            "evidence": finding.evidence,
+            "fix": finding.fix,
+            "location": finding.location,
+        })
+        assert "AKIAIOSFODNN7EXAMPLE" not in full, "Raw secret leaked in finding"
+
+    def test_password_value_redacted(self, tmp_path):
+        """CRITICAL: password value must not appear in output."""
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.PASSWORD_SECRET]))
+        findings = parse(f, "test")
+        full = json.dumps({
+            "title": findings[0].title,
+            "evidence": findings[0].evidence,
+            "fix": findings[0].fix,
+        })
+        assert "SuperSecret123" not in full, "Raw password leaked in finding"
+
+    def test_masked_preview_present(self, tmp_path):
+        """Masked preview should show type prefix + mask, no suffix."""
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.GENERIC_SECRET]))
+        findings = parse(f, "test")
+        assert "****" in findings[0].evidence
+        assert "AKIA****" in findings[0].evidence
+
+    def test_parse_empty_list(self, tmp_path):
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([]))
+        assert parse(f, "test") == []
+
+    def test_parse_missing_file(self, tmp_path):
+        from app.parsers.gitleaks import parse
+        assert parse(tmp_path / "nonexistent.json", "test") == []
+
+    def test_parse_non_list_json(self, tmp_path):
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps({"error": "something"}))
+        assert parse(f, "test") == []
+
+    def test_multiple_secrets(self, tmp_path):
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.GENERIC_SECRET, self.PASSWORD_SECRET]))
+        findings = parse(f, "test")
+        assert len(findings) == 2
+        assert all(f.category == "A07:2025" for f in findings)
+
+    def test_entropy_in_evidence(self, tmp_path):
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.GENERIC_SECRET]))
+        findings = parse(f, "test")
+        assert "Entropy: 3.42" in findings[0].evidence
+
+    def test_short_secret_fully_masked(self, tmp_path):
+        """Secrets without a known prefix are fully masked."""
+        import json
+        from app.parsers.gitleaks import parse
+
+        item = dict(self.PASSWORD_SECRET, Secret="abc12")
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([item]))
+        findings = parse(f, "test")
+        assert "abc12" not in findings[0].evidence
+        assert "********" in findings[0].evidence
+
+    def test_no_suffix_chars_shown(self, tmp_path):
+        """Last characters of the secret must NEVER be shown."""
+        import json
+        from app.parsers.gitleaks import parse
+
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([self.GENERIC_SECRET]))
+        findings = parse(f, "test")
+        full = findings[0].evidence + findings[0].title
+        assert "EXAMPLE" not in full, "Suffix of secret leaked"
+        assert "LE" not in full.replace("Rule", "").replace("Masked value", ""), \
+            "Last 2 chars of secret leaked"
+
+    def test_type_prefix_shown_for_known_format(self, tmp_path):
+        """Known prefixes like sk-proj- should be preserved for identification."""
+        import json
+        from app.parsers.gitleaks import parse
+
+        item = dict(self.GENERIC_SECRET, Secret="sk-proj-abc123def456ghi789")
+        f = tmp_path / "gitleaks.json"
+        f.write_text(json.dumps([item]))
+        findings = parse(f, "test")
+        assert "sk-proj-****" in findings[0].evidence
+        assert "789" not in findings[0].evidence
+
+
+class TestGitleaksCheckRegistry:
+    """Verify gitleaks check registry fields."""
+
+    def test_a07_has_gitleaks(self):
+        from app.checks import CHECKS
+        assert "gitleaks" in CHECKS["A07"].sast_tools
+
+    def test_a02_has_gitleaks(self):
+        from app.checks import CHECKS
+        assert "gitleaks" in CHECKS["A02"].sast_tools
+
+    def test_a07_sast_detectability_stays_partial(self):
+        """A07 stays partial — gitleaks finds secrets but not all auth flaws."""
+        from app.checks import CHECKS
+        assert CHECKS["A07"].sast_detectability == "partial"
+
+    def test_gitleaks_needed_for_a07(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A07"], "gitleaks") is True
+
+    def test_gitleaks_needed_for_a02(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A02"], "gitleaks") is True
+
+    def test_gitleaks_not_needed_for_a05(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A05"], "gitleaks") is False
+
+    def test_gitleaks_not_needed_for_a03(self):
+        from app.checks import checks_need_sast_tool
+        assert checks_need_sast_tool(["A03"], "gitleaks") is False

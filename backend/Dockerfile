@@ -47,6 +47,14 @@ ARG SEMGREP_VERSION=1.168.0
 RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" \
     && semgrep --version
 
+# gitleaks (secrets scanner: hardcoded API keys, passwords, tokens)
+ARG GITLEAKS_VERSION=8.30.1
+RUN curl -fsSL -o /tmp/gitleaks.tar.gz \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+    && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && rm /tmp/gitleaks.tar.gz \
+    && gitleaks version
+
 # ── Python deps ──────────────────────────────────────────────────────────────
 
 COPY requirements.txt .

@@ -1,0 +1,136 @@
+# DAST — nightly schedule + manual trigger.
+# Spins up juice-shop + ZAP via docker compose, runs the DAST orchestrator,
+# uploads results. Does NOT run on push/PR (too slow for a PR gate).
+
+name: DAST (Nightly)
+
+on:
+  schedule:
+    # 02:00 UTC daily (off-peak, doesn't block development)
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: "Scan depth: baseline (~2min) or full (~30min)"
+        required: false
+        default: "baseline"
+        type: choice
+        options:
+          - baseline
+          - full
+
+permissions:
+  contents: read
+
+env:
+  # The ONLY target DAST is authorized to scan (matches SCOPE.md allowlist).
+  # Hardcoded here as defense-in-depth — run-all.sh also enforces scope.
+  DAST_TARGET: "http://localhost:3000"
+  # Lenient gate: DAST is a scheduled audit, not a PR blocker.
+  # "report" = never fail; "critical" = fail only on critical.
+  DAST_GATE: "report"
+
+jobs:
+  dast:
+    name: DAST Baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Start target + ZAP via compose ──────────────────────────────────
+      # Only bring up juice-shop and zap (not the backend — DAST uses
+      # run-all.sh directly, not the API).
+
+      - name: Start juice-shop + ZAP
+        run: |
+          docker compose up -d juice-shop zap
+          echo "Waiting for services..."
+
+      - name: Wait for juice-shop health
+        run: |
+          echo "Polling http://localhost:3000 ..."
+          for i in $(seq 1 60); do
+            if curl -sf --max-time 5 http://localhost:3000 > /dev/null 2>&1; then
+              echo "juice-shop is up (attempt $i)"
+              break
+            fi
+            if [ $i -eq 60 ]; then
+              echo "::error::juice-shop did not start within 120s"
+              docker compose logs juice-shop
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Wait for ZAP API health
+        run: |
+          ZAP_URL="http://localhost:8080"
+          ZAP_KEY="masrek-zap-dev-key"
+          echo "Polling ZAP API at $ZAP_URL ..."
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 "${ZAP_URL}/JSON/core/view/version/?apikey=${ZAP_KEY}" > /dev/null 2>&1; then
+              echo "ZAP API is up (attempt $i)"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "::error::ZAP API did not start within 60s"
+              docker compose logs zap
+              exit 1
+            fi
+            sleep 2
+          done
+
+      # ── Run the DAST orchestrator ───────────────────────────────────────
+      # Uses the same run-all.sh that the backend uses. Scope enforcement
+      # is built into the script (parses SCOPE.md, refuses out-of-scope).
+      # The target is hardcoded to the in-scope localhost instance above.
+
+      - name: Run DAST scan
+        env:
+          MASREK_PROJECT_ROOT: ${{ github.workspace }}
+          SCOPE_FILE: ${{ github.workspace }}/SCOPE.md
+          RESULTS_DIR: ${{ github.workspace }}/results
+          ZAP_API_URL: "http://localhost:8080"
+          ZAP_API_KEY: "masrek-zap-dev-key"
+        run: |
+          SCAN_TYPE="${{ inputs.scan_type || 'baseline' }}"
+          echo "::notice::DAST scan starting — target=$DAST_TARGET type=$SCAN_TYPE"
+
+          # run-all.sh enforces SCOPE.md authorization internally
+          bash tools/run-all.sh \
+            --target "$DAST_TARGET" \
+            --mode active \
+            --scan-type "$SCAN_TYPE" \
+            || {
+              rc=$?
+              echo "::warning::run-all.sh exited with code $rc (results may be partial)"
+            }
+
+      # ── Tear down ──────────────────────────────────────────────────────
+
+      - name: Tear down services
+        if: always()
+        run: docker compose down --timeout 10
+
+      # ── Upload results ──────────────────────────────────────────────────
+
+      - name: Upload DAST results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-results-${{ github.run_number }}
+          path: results/
+          retention-days: 30
+
+      # ── Optional gate (report-only by default) ──────────────────────────
+
+      - name: DAST gate
+        if: env.DAST_GATE != 'report'
+        run: |
+          echo "::notice::DAST gate mode: $DAST_GATE"
+          # For now, DAST is report-only. If DAST_GATE is set to "critical",
+          # parse the results and fail on critical findings.
+          # The full gate logic will mirror the SAST gate once the DAST
+          # parser is integrated into CI.
+          echo "::notice::DAST gate evaluation — not yet wired to parser (report-only)"

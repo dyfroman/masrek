@@ -1,0 +1,238 @@
+# SAST/SCA — runs on every push and PR.
+# Scans the repo's own source with the same tools and versions as the backend container.
+# Fails the build on critical/high findings only (configurable via FAIL_SEVERITY).
+
+name: SAST & SCA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # ── Pinned tool versions (match backend/Dockerfile) ──────────────────────
+  OSV_SCANNER_VERSION: "1.9.1"
+  TRIVY_VERSION: "0.71.0"
+  SEMGREP_VERSION: "1.168.0"
+  GITLEAKS_VERSION: "8.30.1"
+  # ── Gate threshold: "critical", "high", "medium", or "low" ──────────────
+  # Findings at or above this severity fail the build.
+  FAIL_SEVERITY: "high"
+
+jobs:
+  sast:
+    name: SAST / SCA / Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── Install tools (same versions as Dockerfile, binary checks) ──────
+
+      - name: Install osv-scanner v${{ env.OSV_SCANNER_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" \
+            -o /usr/local/bin/osv-scanner
+          chmod +x /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      - name: Install trivy v${{ env.TRIVY_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
+          rm /tmp/trivy.tar.gz
+          trivy --version
+
+      - name: Install semgrep v${{ env.SEMGREP_VERSION }}
+        run: |
+          pip install --quiet "semgrep==${SEMGREP_VERSION}"
+          semgrep --version
+
+      - name: Install gitleaks v${{ env.GITLEAKS_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm /tmp/gitleaks.tar.gz
+          gitleaks version
+
+      # ── Install backend Python deps (for the summary script) ────────────
+
+      - name: Install backend deps
+        run: pip install --quiet -r backend/requirements.txt
+
+      # ── Run scanners ────────────────────────────────────────────────────
+
+      - name: Create results directory
+        run: mkdir -p results/sast
+
+      - name: osv-scanner (SCA — lockfile vulnerabilities)
+        run: |
+          # Exit 1 = vulns found (not an error); other non-zero = real failure
+          osv-scanner scan --recursive --format json . > results/sast/osv-scanner.json 2>/dev/null || {
+            rc=$?
+            if [ $rc -ne 1 ]; then
+              echo "::warning::osv-scanner exited with unexpected code $rc"
+            fi
+          }
+
+      - name: trivy (SCA + misconfig)
+        run: |
+          trivy fs --format json --scanners vuln,misconfig,secret \
+            --skip-java-db-update \
+            . > results/sast/trivy.json 2>/dev/null || true
+
+      - name: semgrep (SAST — code patterns)
+        run: |
+          # Exit 1 = findings found (not an error)
+          semgrep scan \
+            --config "p/security-audit" --config "p/bandit" --config "p/secrets" \
+            --json --metrics=off \
+            . > results/sast/semgrep.json 2>/dev/null || {
+            rc=$?
+            if [ $rc -ne 1 ]; then
+              echo "::warning::semgrep exited with unexpected code $rc"
+            fi
+          }
+
+      - name: gitleaks (secrets — raw output is sensitive)
+        run: |
+          # gitleaks exit 1 = leaks found; output contains raw secret values
+          gitleaks dir --report-format json --report-path results/sast/gitleaks-raw.json \
+            --no-banner . 2>/dev/null || true
+
+      # ── Parse results through the backend parsers (redaction enforced) ──
+      # This runs the same parsers used in production, ensuring:
+      #   - Secret values are redacted before they appear in logs or artifacts
+      #   - OWASP category mapping is consistent with the platform
+      #   - Severity counts match what the platform would report
+
+      - name: Parse and summarize findings
+        id: summary
+        run: |
+          cd backend
+          python -c "
+          import json, sys, os
+          sys.path.insert(0, '.')
+          from app.parsers.osv import parse as parse_osv
+          from app.parsers.trivy import parse as parse_trivy
+          from app.parsers.semgrep import parse as parse_semgrep
+          from app.parsers.gitleaks import parse as parse_gitleaks
+          from pathlib import Path
+
+          results_dir = Path('../results/sast')
+          findings = []
+
+          # Parse each tool's output through the production parsers
+          for parser, filename in [
+              (parse_osv, 'osv-scanner.json'),
+              (parse_trivy, 'trivy.json'),
+              (parse_semgrep, 'semgrep.json'),
+              (parse_gitleaks, 'gitleaks-raw.json'),
+          ]:
+              path = results_dir / filename
+              if path.exists() and path.stat().st_size > 0:
+                  try:
+                      findings.extend(parser(path, 'ci'))
+                  except Exception as e:
+                      print(f'::warning::Failed to parse {filename}: {e}')
+
+          # Count by severity
+          counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'info': 0}
+          for f in findings:
+              sev = f.severity.lower()
+              if sev in counts:
+                  counts[sev] += 1
+
+          total = sum(counts.values())
+          print(f'::notice::SAST Summary: {total} findings — '
+                f'{counts[\"critical\"]} critical, {counts[\"high\"]} high, '
+                f'{counts[\"medium\"]} medium, {counts[\"low\"]} low, {counts[\"info\"]} info')
+
+          # Write redacted summary for artifact (NO raw secrets)
+          summary = {
+              'total': total,
+              **counts,
+              'findings': [],
+          }
+          for f in findings:
+              summary['findings'].append({
+                  'severity': f.severity,
+                  'title': f.title,
+                  'category': f.category,
+                  'category_name': f.category_name,
+                  'location': f.location,
+                  'source_tool': f.source_tool,
+                  'mapping': f.mapping,
+                  # evidence is already redacted by parsers
+                  'evidence': f.evidence[:200] if f.evidence else '',
+              })
+
+          with open(str(results_dir / 'summary.json'), 'w') as out:
+              json.dump(summary, out, indent=2)
+
+          # Print critical/high to the Actions log
+          fail_findings = [f for f in findings if f.severity in ('critical', 'high')]
+          if fail_findings:
+              print()
+              print('=== Critical/High Findings ===')
+              for f in fail_findings:
+                  print(f'  [{f.severity.upper()}] {f.category} | {f.title[:100]}')
+                  print(f'           at {f.location} (via {f.source_tool})')
+              print()
+
+          # Set outputs for the gate step
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as gh:
+              gh.write(f'total={total}\n')
+              gh.write(f'critical={counts[\"critical\"]}\n')
+              gh.write(f'high={counts[\"high\"]}\n')
+              gh.write(f'medium={counts[\"medium\"]}\n')
+              gh.write(f'low={counts[\"low\"]}\n')
+          "
+
+      # ── Remove raw gitleaks output (contains unredacted secrets) ────────
+
+      - name: Remove raw gitleaks output before artifact upload
+        run: rm -f results/sast/gitleaks-raw.json
+
+      # ── Upload redacted results as artifact ─────────────────────────────
+
+      - name: Upload SAST results (redacted)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-results
+          path: results/sast/
+          retention-days: 30
+
+      # ── Gate: fail on critical/high ─────────────────────────────────────
+
+      - name: Security gate
+        run: |
+          CRITICAL=${{ steps.summary.outputs.critical }}
+          HIGH=${{ steps.summary.outputs.high }}
+
+          if [ "$FAIL_SEVERITY" = "critical" ]; then
+            FAIL_COUNT=$CRITICAL
+          elif [ "$FAIL_SEVERITY" = "high" ]; then
+            FAIL_COUNT=$((CRITICAL + HIGH))
+          elif [ "$FAIL_SEVERITY" = "medium" ]; then
+            FAIL_COUNT=$((CRITICAL + HIGH + ${{ steps.summary.outputs.medium }}))
+          else
+            FAIL_COUNT=${{ steps.summary.outputs.total }}
+          fi
+
+          if [ "${FAIL_COUNT:-0}" -gt 0 ]; then
+            echo "::error::Security gate FAILED: $FAIL_COUNT finding(s) at severity >= $FAIL_SEVERITY"
+            exit 1
+          else
+            echo "::notice::Security gate passed — no findings at severity >= $FAIL_SEVERITY"
+          fi

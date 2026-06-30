@@ -35,7 +35,7 @@ services:
     volumes:
       - ./SCOPE.md:/app/SCOPE.md:ro
       - ./tools:/app/tools:ro
-      - ./results:/app/results
+      - masrek-results:/app/results
       - ./source:/app/source:ro
     environment:
       - MASREK_PROJECT_ROOT=/app
@@ -59,3 +59,6 @@ services:
       - VITE_API_BASE=http://localhost:8000
     depends_on:
       - backend
+
+volumes:
+  masrek-results:
